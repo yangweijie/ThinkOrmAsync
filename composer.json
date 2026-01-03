@@ -1,0 +1,34 @@
+{
+    "name": "yangweijie/think-orm-async",
+    "description": "think-orm 异步并行执行扩展",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Yangweijie\\ThinkOrmAsync\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "yangweijie",
+            "email": "917647288@qq.com"
+        }
+    ],
+    "minimum-stability": "stable",
+    "require": {
+        "topthink/think-orm": "^3.0|^4.0"
+    },
+    "require-dev": {
+        "pestphp/pest": "^2.0",
+        "mockery/mockery": "^1.6"
+    },
+    "scripts": {
+        "test": "vendor/bin/pest",
+        "test-coverage": "vendor/bin/pest --coverage"
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}
