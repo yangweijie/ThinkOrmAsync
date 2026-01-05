@@ -12,19 +12,96 @@ class AsyncContext {
     private ?AsyncQuery $asyncQuery = null;
     private int $timeout = 10;
     
-    private function __construct(?BaseQuery $query = null) {
-        $this->asyncQuery = new AsyncQuery($query);
+    private function __construct(?BaseQuery $query = null, ?array $dbConfig = null) {
+        $this->asyncQuery = new AsyncQuery($query, $dbConfig);
     }
     
-    public static function start(?BaseQuery $query = null): self {
+    public static function start(?BaseQuery $query = null, ?array $dbConfig = null): self {
         if (self::$active) {
             throw new \RuntimeException('Async context already started');
         }
         
+        // 如果没有传递数据库配置，自动从 ThinkPHP 配置中读取
+        if ($dbConfig === null) {
+            $dbConfig = self::getDefaultDbConfig();
+        }
+        
+        // 检查数据库类型是否为 MySQL
+        self::checkDatabaseType($dbConfig);
+        
+        // 检查是否支持 mysqli_poll
+        self::checkMysqliPollSupport();
+        
         self::$active = true;
-        self::$instance = new self($query);
+        self::$instance = new self($query, $dbConfig);
         
         return self::$instance;
+    }
+    
+    private static function checkDatabaseType(array $dbConfig): void {
+        // 检查数据库类型
+        $dbType = $dbConfig['type'] ?? 'mysql';
+        
+        if (strtolower($dbType) !== 'mysql') {
+            throw new \RuntimeException(
+                "Async query only supports MySQL database, current database type is: {$dbType}"
+            );
+        }
+    }
+    
+    private static function checkMysqliPollSupport(): void {
+        // 检查 mysqli 扩展是否可用
+        if (!extension_loaded('mysqli')) {
+            throw new \RuntimeException(
+                'mysqli extension is required for async queries but is not loaded'
+            );
+        }
+        
+        // 检查是否支持 MYSQLI_ASYNC 常量
+        if (!defined('MYSQLI_ASYNC')) {
+            throw new \RuntimeException(
+                'mysqli extension does not support async queries (MYSQLI_ASYNC constant not defined)'
+            );
+        }
+        
+        // 检查是否支持 mysqli_poll 函数
+        if (!function_exists('mysqli_poll')) {
+            throw new \RuntimeException(
+                'mysqli_poll function is not available, async queries are not supported'
+            );
+        }
+    }
+    
+    private static function getDefaultDbConfig(): array {
+        try {
+            // 尝试从 ThinkPHP 配置中读取数据库配置
+            $config = [];
+            
+            // 读取数据库配置
+            if (function_exists('config')) {
+                $dbConfig = config('database.connections.mysql', []);
+                
+                if (!empty($dbConfig)) {
+                    // 映射 ThinkPHP 配置键到标准配置
+                    $config = [
+                        'hostname' => $dbConfig['hostname'] ?? $dbConfig['host'] ?? 'localhost',
+                        'database' => $dbConfig['database'] ?? $dbConfig['database'] ?? '',
+                        'username' => $dbConfig['username'] ?? $dbConfig['user'] ?? 'root',
+                        'password' => $dbConfig['password'] ?? '',
+                        'hostport' => $dbConfig['hostport'] ?? $dbConfig['port'] ?? 3306,
+                        'charset' => $dbConfig['charset'] ?? $dbConfig['charset'] ?? 'utf8mb4',
+                    ];
+                    
+                    return $config;
+                }
+            }
+            
+            // 如果没有配置，返回空配置（会在实际查询时失败，但不会在这里报错）
+            return [];
+        } catch (\Exception $e) {
+            // 如果出错，返回空配置
+            return [];
+        }
     }
     
     public static function end(): array {
@@ -55,13 +132,30 @@ class AsyncContext {
         return $this;
     }
     
-    public function addQuery(string $key, BaseQuery $query, string $method): void {
+    public function addQuery(string $key, $query, string $method): void {
         $this->queries[$key] = [
             'query' => $query,
             'method' => $method,
             'sql' => $this->extractSql($query, $method),
             'model' => $this->getModelClass($query),
+            'type' => 'orm',
         ];
+    }
+    
+    public static function query(string $sql, string $key = null): AsyncResultPlaceholder {
+        if (!self::$active) {
+            throw new \RuntimeException('Async context not started');
+        }
+        
+        $instance = self::$instance;
+        $queryKey = $key ?? md5($sql . '_' . uniqid('', true));
+        
+        $instance->queries[$queryKey] = [
+            'sql' => $sql,
+            'type' => 'raw',
+        ];
+        
+        return new AsyncResultPlaceholder($queryKey, 'raw');
     }
     
     public function setResult(string $key, $value): void {
@@ -90,11 +184,29 @@ class AsyncContext {
                 continue;
             }
             
-            $data = $raw['data'] ?? [];
-            $method = $this->queries[$key]['method'];
-            $modelClass = $this->queries[$key]['model'];
+            $queryType = $this->queries[$key]['type'] ?? 'orm';
             
-            $this->results[$key] = $this->convertResult($data, $method, $modelClass);
+            if ($queryType === 'raw') {
+                // 原生查询，直接返回结果
+                if (isset($raw['type']) && $raw['type'] === 'exec') {
+                    // 执行类查询（INSERT/UPDATE/DELETE）
+                    $this->results[$key] = [
+                        'type' => 'exec',
+                        'affected_rows' => $raw['affected_rows'],
+                        'insert_id' => $raw['insert_id'],
+                    ];
+                } else {
+                    // SELECT 查询
+                    $this->results[$key] = $raw['data'] ?? [];
+                }
+            } else {
+                // ORM 查询
+                $data = $raw['data'] ?? [];
+                $method = $this->queries[$key]['method'];
+                $modelClass = $this->queries[$key]['model'];
+                
+                $this->results[$key] = $this->convertResult($data, $method, $modelClass);
+            }
         }
         
         $this->asyncQuery->close();
@@ -110,13 +222,12 @@ class AsyncContext {
         if ($modelClass && class_exists($modelClass)) {
             if ($method === 'find') {
                 $model = new $modelClass($data[0]);
-                $model->isUpdate(true);
+                // 对于异步查询的结果，直接返回模型对象，不需要标记为更新状态
                 return $model;
             } else {
                 $models = [];
                 foreach ($data as $item) {
                     $model = new $modelClass($item);
-                    $model->isUpdate(true);
                     $models[] = $model;
                 }
                 return $models;
@@ -130,7 +241,12 @@ class AsyncContext {
         return $data;
     }
     
-    private function extractSql(BaseQuery $query, string $method): string {
+    private function extractSql($query, string $method): string {
+        if ($query instanceof AsyncQueryWrapper) {
+            $builder = $query->getConnection()->getBuilder();
+            return $method === 'find' ? $builder->select($query, true) : $builder->select($query, false);
+        }
+        
         $fetchClass = new \think\db\Fetch($query);
         
         if ($method === 'find') {
@@ -142,7 +258,11 @@ class AsyncContext {
         throw new \InvalidArgumentException("Unknown method: {$method}");
     }
     
-    private function getModelClass(BaseQuery $query): ?string {
+    private function getModelClass($query): ?string {
+        if ($query instanceof AsyncQueryWrapper) {
+            return $query->model();
+        }
+        
         try {
             $reflection = new \ReflectionClass($query);
             

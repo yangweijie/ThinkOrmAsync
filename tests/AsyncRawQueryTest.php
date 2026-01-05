@@ -1,31 +1,7 @@
 <?php
 
 use Yangweijie\ThinkOrmAsync\AsyncContext;
-use Yangweijie\ThinkOrmAsync\AsyncModelTrait;
 use Yangweijie\ThinkOrmAsync\AsyncResultPlaceholder;
-
-// 配置最小化的数据库连接
-\think\facade\Db::setConfig([
-    'default' => 'mysql',
-    'connections' => [
-        'mysql' => [
-            'type' => 'mysql',
-            'hostname' => 'localhost',
-            'database' => 'test',
-            'username' => 'root',
-            'password' => '',
-            'hostport' => '3306',
-            'charset' => 'utf8mb4',
-        ],
-    ],
-]);
-
-class TestModel extends \think\Model {
-    use AsyncModelTrait;
-    
-    protected $table = 'test_table';
-    protected $pk = 'id';
-}
 
 beforeEach(function () {
     // 确保每个测试从干净的状态开始
@@ -46,10 +22,10 @@ beforeEach(function () {
     }
 });
 
-test('find returns placeholder in async context', function () {
+test('query returns placeholder in async context', function () {
     AsyncContext::start();
     
-    $result = TestModel::where('id', 1)->find();
+    $result = AsyncContext::query("SELECT 1 as test");
     
     expect($result)->toBeInstanceOf(AsyncResultPlaceholder::class);
     
@@ -64,10 +40,15 @@ test('find returns placeholder in async context', function () {
     $instance->setValue(null, null);
 });
 
-test('select returns placeholder in async context', function () {
+test('query throws exception when context not started', function () {
+    expect(fn() => AsyncContext::query("SELECT 1"))
+        ->toThrow(\RuntimeException::class, 'Async context not started');
+});
+
+test('query with custom key', function () {
     AsyncContext::start();
     
-    $result = TestModel::where('status', 1)->select();
+    $result = AsyncContext::query("SELECT 1 as test", 'custom_key');
     
     expect($result)->toBeInstanceOf(AsyncResultPlaceholder::class);
     
@@ -82,15 +63,24 @@ test('select returns placeholder in async context', function () {
     $instance->setValue(null, null);
 });
 
-test('find calls parent in sync context', function () {
-    // 在非异步上下文中，where 应该返回真实的查询构建器
-    // 但为了避免数据库配置问题，我们只测试异步上下文的行为
-    // 这个测试在实际使用中需要配置数据库
+test('multiple queries can be registered', function () {
+    AsyncContext::start();
     
-    // 我们可以验证在非异步上下文中不会返回 AsyncQueryBuilder
+    $result1 = AsyncContext::query("SELECT 1 as test");
+    $result2 = AsyncContext::query("SELECT 2 as test");
+    $result3 = AsyncContext::query("SELECT 3 as test");
+    
+    expect($result1)->toBeInstanceOf(AsyncResultPlaceholder::class);
+    expect($result2)->toBeInstanceOf(AsyncResultPlaceholder::class);
+    expect($result3)->toBeInstanceOf(AsyncResultPlaceholder::class);
+    
+    // 使用反射清理异步上下文（不执行查询）
     $reflection = new \ReflectionClass(AsyncContext::class);
     $active = $reflection->getProperty('active');
     $active->setAccessible(true);
+    $active->setValue(null, false);
     
-    expect($active->getValue(null))->toBeFalse();
+    $instance = $reflection->getProperty('instance');
+    $instance->setAccessible(true);
+    $instance->setValue(null, null);
 });

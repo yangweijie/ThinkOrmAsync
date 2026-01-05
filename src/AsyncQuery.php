@@ -11,8 +11,12 @@ class AsyncQuery {
     private ?ConnectionErrorRetryStrategy $retryStrategy = null;
     private int $timeout = 10;
     
-    public function __construct(?BaseQuery $query = null) {
-        if ($query) {
+    public function __construct(?BaseQuery $query = null, ?array $config = null) {
+        if ($config) {
+            $this->config = $config;
+            $this->retryStrategy = new ConnectionErrorRetryStrategy();
+            $this->initConnections();
+        } elseif ($query) {
             $this->config = $query->getConfig();
             $this->retryStrategy = new ConnectionErrorRetryStrategy();
             $this->initConnections();
@@ -24,7 +28,8 @@ class AsyncQuery {
             return;
         }
         
-        $this->connections['default'] = $this->createConnection($this->config);
+        // 不立即创建连接，在执行查询时才创建
+        // $this->connections['default'] = $this->createConnection($this->config);
     }
     
     private function createConnection(array $config): \mysqli {
@@ -57,25 +62,30 @@ class AsyncQuery {
         $results = [];
         $pending = [];
         $connMap = [];
+        $connectionsToClose = [];
         
         foreach ($queries as $key => $sql) {
-            $conn = $this->getConnection();
-            
-            if (!$conn) {
-                $results[$key] = ['error' => 'Failed to get connection'];
-                continue;
-            }
-            
+            // 为每个查询创建独立的连接
             try {
+                $conn = $this->createConnection($this->config);
                 $conn->query($sql, MYSQLI_ASYNC);
                 $connMap[$key] = $conn;
                 $pending[$key] = $conn;
+                $connectionsToClose[$key] = $conn;
             } catch (\mysqli_sql_exception $e) {
                 if ($this->retryStrategy && $this->retryStrategy->shouldRetry(1, $e)) {
-                    $conn = $this->reconnect($conn);
-                    $conn->query($sql, MYSQLI_ASYNC);
-                    $connMap[$key] = $conn;
-                    $pending[$key] = $conn;
+                    try {
+                        $conn = $this->createConnection($this->config);
+                        $conn->query($sql, MYSQLI_ASYNC);
+                        $connMap[$key] = $conn;
+                        $pending[$key] = $conn;
+                        $connectionsToClose[$key] = $conn;
+                    } catch (\Exception $retryEx) {
+                        $results[$key] = [
+                            'error' => $retryEx->getMessage(),
+                            'code' => $retryEx->getCode(),
+                        ];
+                    }
                 } else {
                     $results[$key] = [
                         'error' => $e->getMessage(),
@@ -86,6 +96,11 @@ class AsyncQuery {
         }
         
         $results = $this->pollAndCollect($pending, $connMap, $results);
+        
+        // 关闭所有临时连接
+        foreach ($connectionsToClose as $conn) {
+            $conn->close();
+        }
         
         return $results;
     }

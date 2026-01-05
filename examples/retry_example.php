@@ -8,6 +8,7 @@ class User extends \think\Model {
     use AsyncModelTrait;
 }
 
+// 开始异步上下文（自动从 ThinkPHP 配置读取数据库配置）
 AsyncContext::start();
 
     $user = User::where('id', 1)->find();

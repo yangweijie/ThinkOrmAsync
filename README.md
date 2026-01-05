@@ -3,6 +3,8 @@
 ## 功能特性
 
 - ✅ 透明的异步查询 API（与同步代码完全一致）
+- ✅ 支持 ORM 查询和原生 SQL 查询
+- ✅ 自动从 ThinkPHP 配置读取数据库配置
 - ✅ 自动连接重试（仅限连接错误）
 - ✅ 延迟加载结果占位符
 - ✅ 零侵入集成（trait + 单例）
@@ -14,7 +16,7 @@
 composer require yangweijie/think-orm-async
 ```
 
-## 基本使用
+## 快速开始
 
 ### 1. 在模型中引入 trait
 
@@ -27,14 +29,18 @@ use Yangweijie\ThinkOrmAsync\AsyncModelTrait;
 
 class User extends Model {
     use AsyncModelTrait;
+    protected $name = 'user';
+    protected $prefix = '';  // 可选：表前缀
 }
 
 class Order extends Model {
     use AsyncModelTrait;
+    protected $name = 'order';
 }
 
 class Product extends Model {
     use AsyncModelTrait;
+    protected $name = 'product';
 }
 ```
 
@@ -51,15 +57,18 @@ use app\model\Product;
 
 class UserController {
     public function detail($id) {
-        // 开始异步上下文
+        // 开始异步上下文（自动从配置读取数据库配置）
         AsyncContext::start();
         
-            // 正常写查询，完全透明
+            // ORM 查询
             $user = User::where('id', $id)->find();
             $orders = Order::where('user_id', $id)->select();
             $products = Product::where('status', 1)->select();
+            
+            // 原生 SQL 查询
+            $stats = AsyncContext::query("SELECT COUNT(*) as total FROM user");
         
-        // 结束异步上下文，执行所有查询
+        // 结束异步上下文，执行所有查询（并行执行）
         AsyncContext::end();
         
         // 使用结果（和同步模式完全一样）
@@ -70,11 +79,115 @@ class UserController {
         }
         
         echo "Products: " . count($products);
+        echo "Total users: " . $stats[0]['total'];
     }
 }
 ```
 
-### 3. 设置超时
+## 基本使用
+
+### ORM 查询
+
+```php
+AsyncContext::start();
+
+    // find 查询
+    $user = User::find(1);
+    
+    // select 查询
+    $users = User::where('status', 1)->select();
+    
+    // 链式查询
+    $orders = Order::where('user_id', 1)
+        ->order('create_time', 'desc')
+        ->limit(10)
+        ->select();
+
+$results = AsyncContext::end();
+
+// 访问结果
+echo $user->name;
+echo $users->count();
+```
+
+### 原生 SQL 查询
+
+```php
+AsyncContext::start();
+
+    // 简单查询
+    $result = AsyncContext::query("SELECT * FROM user WHERE id = 1");
+    
+    // 复杂查询
+    $stats = AsyncContext::query("
+        SELECT 
+            COUNT(*) as total,
+            AVG(age) as avg_age
+        FROM user
+        WHERE status = 1
+    ");
+    
+    // 自定义 key
+    $custom = AsyncContext::query("SELECT COUNT(*) FROM order", 'order_count');
+
+$results = AsyncContext::end();
+
+// 访问结果
+echo $result[0]['name'];
+echo $stats[0]['total'];
+echo $custom[0]['order_count'];
+```
+
+### 混合使用 ORM 和原生查询
+
+```php
+AsyncContext::start();
+
+    // ORM 查询
+    $user = User::find(1);
+    $orders = Order::where('user_id', 1)->select();
+    
+    // 原生查询
+    $stats = AsyncContext::query("SELECT COUNT(*) as total FROM user");
+
+$results = AsyncContext::end();
+
+// 所有查询并行执行
+```
+
+## 配置
+
+### 自动配置（推荐）
+
+在 ThinkPHP 项目中，`AsyncContext::start()` 会自动从 `config('database.connections.mysql')` 读取配置：
+
+```php
+// 无需传递配置，自动读取
+AsyncContext::start();
+    $result = AsyncContext::query("SELECT 1");
+$results = AsyncContext::end();
+```
+
+### 手动配置
+
+在非 ThinkPHP 项目中，需要手动传递配置：
+
+```php
+$dbConfig = [
+    'hostname' => 'localhost',
+    'database' => 'your_database',
+    'username' => 'root',
+    'password' => 'password',
+    'hostport' => '3306',
+    'charset' => 'utf8mb4',
+];
+
+AsyncContext::start(null, $dbConfig);
+    $result = AsyncContext::query("SELECT 1");
+$results = AsyncContext::end();
+```
+
+### 设置超时
 
 ```php
 AsyncContext::start()->setTimeout(15);
@@ -126,7 +239,7 @@ try {
     $results = AsyncContext::end();
     
     // 处理成功结果
-    echo "User: " . $results['user']->name . "\n";
+    echo "User: " . $user->name . "\n";
     
 } catch (AsyncQueryException $e) {
     // 批次查询整体失败
@@ -169,12 +282,12 @@ AsyncContext::start();
 $results = AsyncContext::end();
 
 // 数组访问
-echo $user['name'];
+echo $user->name;
 echo $user['email'];
 
 // 遍历
 foreach ($orders as $order) {
-    echo $order['order_no'];
+    echo $order->order_no;
 }
 
 // 计数
@@ -201,6 +314,24 @@ $json = $orders->toJson();
 echo $json;
 ```
 
+### 获取模型对象
+
+```php
+AsyncContext::start();
+
+    $user = User::where('id', 1)->find();
+    $orders = Order::where('user_id', 1)->select();
+
+$results = AsyncContext::end();
+
+// 获取实际的模型对象
+$userModel = $user->getModel();
+dump($userModel);  // 显示完整的模型对象
+
+// 或者直接使用（透明代理）
+echo $user->name;
+```
+
 ### 辅助方法
 
 ```php
@@ -218,10 +349,11 @@ $lastOrder = $orders->last();
 
 ## 注意事项
 
-1. **必须在 Swoole 环境外使用**：这个方案不依赖 Swoole，可以在 PHP-FPM/CLI 环境使用
+1. **ThinkPHP 环境**：在 ThinkPHP 项目中，会自动从 `config('database.connections.mysql')` 读取配置
 2. **mysqlnd 驱动**：需要使用 mysqlnd 驱动（PHP 5.3+ 默认）
 3. **不要在循环中使用**：避免在循环中嵌套 `AsyncContext::start()` / `AsyncContext::end()`
 4. **错误处理**：查询失败时会抛出异常，需要自行处理
+5. **表前缀**：确保模型类正确设置了 `$name` 和 `$prefix` 属性
 
 ## 性能提升
 
