@@ -15,6 +15,9 @@
         }
     ],
     "minimum-stability": "stable",
+    "require":{
+      "ext-pdo_mysql": "*"
+    },
     "require-dev": {
         "pestphp/pest": "^2.0",
         "mockery/mockery": "^1.6"
