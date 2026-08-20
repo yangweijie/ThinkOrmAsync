@@ -142,7 +142,7 @@ class AsyncContext {
         ];
     }
     
-    public static function query(string $sql, string $key = null): AsyncResultPlaceholder {
+    public static function query(string $sql, string $key = ''): AsyncResultPlaceholder {
         if (!self::$active) {
             throw new \RuntimeException('Async context not started');
         }
