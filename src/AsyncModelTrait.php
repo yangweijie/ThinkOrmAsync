@@ -76,15 +76,14 @@ trait AsyncModelTrait {
                     }
                 }
                 
-                // 如果都没有，使用类名的小写版本
+                // 如果都没有，使用 ThinkPHP 的 snake_case 规则：AppInfo → app_info
                 $className = basename(str_replace('\\', '/', $modelClass));
                 $prefix = self::getTablePrefix($instance);
-                return $prefix . strtolower($className);
+                return $prefix . self::toSnakeCase($className);
             }
         } catch (\Exception $e) {
-            // 如果出错，使用类名的小写版本
             $className = basename(str_replace('\\', '/', $modelClass));
-            return strtolower($className);
+            return self::toSnakeCase($className);
         }
         
         return null;
@@ -94,7 +93,6 @@ trait AsyncModelTrait {
         try {
             $reflection = new \ReflectionClass($modelInstance);
             
-            // 尝试获取 $prefix 属性
             if ($reflection->hasProperty('prefix')) {
                 $property = $reflection->getProperty('prefix');
                 $property->setAccessible(true);
@@ -105,8 +103,13 @@ trait AsyncModelTrait {
                 }
             }
             
-            // 尝试从配置中获取表前缀
             if (function_exists('config')) {
+                // 先读 webman think-orm 配置
+                $prefix = config('think-orm.connections.mysql.prefix', '');
+                if ($prefix) {
+                    return $prefix;
+                }
+                // 兼容标准 ThinkPHP
                 $prefix = config('database.connections.mysql.prefix', '');
                 if ($prefix) {
                     return $prefix;
@@ -116,5 +119,16 @@ trait AsyncModelTrait {
         }
         
         return '';
+    }
+    
+    /**
+     * ThinkPHP 风格 snake_case：AppInfo → app_info, MchMember → mch_member
+     */
+    private static function toSnakeCase(string $className): string {
+        if (!ctype_lower($className)) {
+            $className = preg_replace('/\s+/u', '', $className);
+            $className = mb_strtolower(preg_replace('/(.)(?=[A-Z])/u', '$1' . '_', $className), 'UTF-8');
+        }
+        return $className;
     }
 }

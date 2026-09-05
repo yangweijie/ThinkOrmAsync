@@ -17,7 +17,12 @@ class AsyncQueryWrapper {
     
     private function getDefaultTableName(): string {
         $className = basename(str_replace('\\', '/', $this->modelClass));
-        return strtolower($className);
+        // ThinkPHP snake_case: AppInfo → app_info
+        if (!ctype_lower($className)) {
+            $className = preg_replace('/\s+/u', '', $className);
+            $className = mb_strtolower(preg_replace('/(.)(?=[A-Z])/u', '$1_', $className), 'UTF-8');
+        }
+        return $className;
     }
     
     public function setPrimaryKeyValue($value): void {
@@ -32,9 +37,23 @@ class AsyncQueryWrapper {
     
     public function where($field, $op = null, $value = null) {
         if (is_array($field)) {
-            // where(['field1' => value1, 'field2' => value2])
-            foreach ($field as $k => $v) {
-                $this->whereConditions[] = ['field' => $k, 'op' => '=', 'value' => $v];
+            // Check if it's ThinkPHP's array-of-arrays syntax: [['field', 'op', 'value'], ...]
+            // vs associative array: ['field' => value]
+            $first = reset($field);
+            if (is_array($first) && count($first) >= 2 && isset($first[0])) {
+                // ThinkPHP array-of-arrays: [['create_time', '>=', $ts], ['end_time', '<', $ts2]]
+                foreach ($field as $cond) {
+                    if (count($cond) >= 3) {
+                        $this->whereConditions[] = ['field' => $cond[0], 'op' => $cond[1], 'value' => $cond[2]];
+                    } elseif (count($cond) === 2) {
+                        $this->whereConditions[] = ['field' => $cond[0], 'op' => '=', 'value' => $cond[1]];
+                    }
+                }
+            } else {
+                // Associative array: ['field1' => value1, 'field2' => value2]
+                foreach ($field as $k => $v) {
+                    $this->whereConditions[] = ['field' => $k, 'op' => '=', 'value' => $v];
+                }
             }
         } elseif ($value === null && !is_string($op)) {
             // where('field', value) — 2 args, op is actually the value, implicit =
@@ -154,13 +173,38 @@ class AsyncQueryWrapper {
         return $this;
     }
     
-    // ==================== Select/Find (Immediate Execution) ====================
+    // ==================== Select/Find ====================
     
     /**
-     * Execute SELECT and return a Collection of model instances or raw arrays.
-     * Called directly by model code in async context (bypasses AsyncContext batching).
+     * SELECT — 在异步上下文中延迟执行（加入批量并行），否则立即执行。
      */
     public function select() {
+        if (AsyncContext::isActive()) {
+            // 延迟：加入异步上下文，等 end() 时并行执行
+            $key = $this->buildQueryKey('select');
+            AsyncContext::getInstance()->addQuery($key, $this, 'select');
+            return new AsyncResultPlaceholder($key, 'select');
+        }
+        // 非异步：立即执行
+        return $this->executeImmediateSelect();
+    }
+    
+    /**
+     * SELECT ... LIMIT 1 — 在异步上下文中延迟执行，否则立即执行。
+     */
+    public function find() {
+        if (AsyncContext::isActive()) {
+            $key = $this->buildQueryKey('find');
+            AsyncContext::getInstance()->addQuery($key, $this, 'find');
+            return new AsyncResultPlaceholder($key, 'find');
+        }
+        return $this->executeImmediateFind();
+    }
+    
+    /**
+     * 立即执行 select，返回 Collection
+     */
+    private function executeImmediateSelect(): \think\Collection {
         $sql = $this->buildSql('select');
         $rows = $this->executeImmediateAll($sql);
         $modelClass = $this->modelClass;
@@ -177,9 +221,9 @@ class AsyncQueryWrapper {
     }
     
     /**
-     * Execute SELECT ... LIMIT 1 and return a single model instance or null.
+     * 立即执行 find，返回 model 或 null
      */
-    public function find() {
+    private function executeImmediateFind() {
         $sql = $this->buildSql('find');
         $rows = $this->executeImmediateAll($sql);
         $modelClass = $this->modelClass;
@@ -195,6 +239,13 @@ class AsyncQueryWrapper {
         }
         
         return $row;
+    }
+    
+    private function buildQueryKey(string $method): string {
+        return md5($this->modelClass . '_' . $method . '_' . md5(serialize([
+            $this->whereConditions,
+            $this->options,
+        ])) . '_' . uniqid('', true));
     }
     
     // ==================== Aggregate Methods ====================

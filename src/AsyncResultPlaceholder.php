@@ -19,6 +19,11 @@ class AsyncResultPlaceholder extends Collection {
     
     private function load(): void {
         if (!$this->loaded) {
+            // 如果异步上下文仍活跃，触发批量并行执行（第一个 placeholder 加载时触发）
+            if (AsyncContext::isActive()) {
+                AsyncContext::end();
+            }
+            
             $value = $this->context ? $this->context->getResult($this->key) : null;
             
             if ($value !== null && isset($value['error'])) {
@@ -95,7 +100,13 @@ class AsyncResultPlaceholder extends Collection {
         }
         
         if (is_array($this->data)) {
-            return $this->data;
+            // 如果元素是模型对象，调用 toArray() 转换为关联数组
+            return array_map(function ($item) {
+                if (is_object($item) && method_exists($item, 'toArray')) {
+                    return $item->toArray();
+                }
+                return $item;
+            }, $this->data);
         }
         
         if ($this->data !== null) {

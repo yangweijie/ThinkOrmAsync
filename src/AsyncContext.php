@@ -74,39 +74,41 @@ class AsyncContext {
     
     private static function getDefaultDbConfig(): array {
         try {
-            // 尝试从 ThinkPHP 配置中读取数据库配置
             $config = [];
             
-            // 读取数据库配置
             if (function_exists('config')) {
-                $dbConfig = config('database.connections.mysql', []);
+                // Webman/ThinkPHP think-orm 配置路径
+                $dbConfig = config('think-orm.connections.mysql', []);
+                
+                // 兼容标准 ThinkPHP database 配置路径
+                if (empty($dbConfig)) {
+                    $dbConfig = config('database.connections.mysql', []);
+                }
                 
                 if (!empty($dbConfig)) {
-                    // 映射 ThinkPHP 配置键到标准配置
                     $config = [
                         'hostname' => $dbConfig['hostname'] ?? $dbConfig['host'] ?? 'localhost',
-                        'database' => $dbConfig['database'] ?? $dbConfig['database'] ?? '',
+                        'database' => $dbConfig['database'] ?? '',
                         'username' => $dbConfig['username'] ?? $dbConfig['user'] ?? 'root',
                         'password' => $dbConfig['password'] ?? '',
                         'hostport' => $dbConfig['hostport'] ?? $dbConfig['port'] ?? 3306,
-                        'charset' => $dbConfig['charset'] ?? $dbConfig['charset'] ?? 'utf8mb4',
+                        'charset' => $dbConfig['charset'] ?? 'utf8mb4',
                     ];
                     
                     return $config;
                 }
             }
             
-            // 如果没有配置，返回空配置（会在实际查询时失败，但不会在这里报错）
             return [];
         } catch (\Exception $e) {
-            // 如果出错，返回空配置
             return [];
         }
     }
     
     public static function end(): array {
         if (!self::$active || self::$instance === null) {
-            throw new \RuntimeException('Async context not started');
+            // 幂等：上下文已结束，返回空结果
+            return [];
         }
         
         self::$active = false;
