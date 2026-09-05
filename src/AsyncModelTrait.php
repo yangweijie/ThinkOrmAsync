@@ -4,27 +4,21 @@ namespace Yangweijie\ThinkOrmAsync;
 trait AsyncModelTrait {
     public static function __callStatic($method, $args) {
         if (AsyncContext::isActive()) {
-            // 在异步上下文中，直接拦截 find 和 select 方法
+            // 在异步上下文中，拦截 find 和 select 方法 — 直接通过 wrapper 执行
             if (in_array($method, ['find', 'select'])) {
                 $modelClass = get_called_class();
-                $key = md5($modelClass . '_' . $method . '_' . serialize($args));
-                
-                // 获取模型的表名
                 $tableName = self::getModelTableName($modelClass);
                 
-                // 创建一个模拟的查询对象
-                $query = new AsyncQueryWrapper($modelClass, $tableName);
+                $wrapper = new AsyncQueryWrapper($modelClass, $tableName);
                 
-                // 如果是 find 方法，保存主键值
+                // 如果是 find 方法，设置主键条件
                 if ($method === 'find' && !empty($args)) {
-                    $query->setPrimaryKeyValue($args[0]);
+                    $pk = self::getModelPk($modelClass);
+                    $wrapper->where($pk, $args[0]);
                 }
                 
-                // 直接添加到异步上下文
-                AsyncContext::getInstance()->addQuery($key, $query, $method);
-                
-                // 返回占位符
-                return new AsyncResultPlaceholder($key, $method);
+                // 直接执行查询并返回结果
+                return $wrapper->$method();
             }
             
             // 其他方法，创建查询构建器包装器
@@ -35,6 +29,19 @@ trait AsyncModelTrait {
         }
         
         return parent::__callStatic($method, $args);
+    }
+    
+    private static function getModelPk(string $modelClass): string {
+        try {
+            if (class_exists($modelClass)) {
+                $instance = (new \ReflectionClass($modelClass))->newInstanceWithoutConstructor();
+                if (method_exists($instance, 'getPk')) {
+                    return $instance->getPk();
+                }
+            }
+        } catch (\Throwable $e) {
+        }
+        return 'id';
     }
     
     private static function getModelTableName(string $modelClass): ?string {

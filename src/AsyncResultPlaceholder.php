@@ -137,6 +137,9 @@ class AsyncResultPlaceholder extends Collection {
     
     public function count(): int {
         $this->load();
+        if (is_scalar($this->data)) {
+            return (int) $this->data;
+        }
         return count($this->data);
     }
     
@@ -180,6 +183,54 @@ class AsyncResultPlaceholder extends Collection {
     public function getModel() {
         $this->load();
         return $this->data;
+    }
+    
+    /**
+     * Allow (int) casting for aggregate results (count, etc.)
+     */
+    public function __toInt(): int {
+        $this->load();
+        if (is_numeric($this->data)) {
+            return (int) $this->data;
+        }
+        if (is_array($this->data) && !empty($this->data)) {
+            $first = reset($this->data);
+            if (is_numeric($first)) {
+                return (int) $first;
+            }
+        }
+        return 0;
+    }
+    
+    /**
+     * Allow (float) casting for aggregate results (sum, avg, etc.)
+     */
+    public function __toFloat(): float {
+        $this->load();
+        if (is_numeric($this->data)) {
+            return (float) $this->data;
+        }
+        if (is_array($this->data) && !empty($this->data)) {
+            $first = reset($this->data);
+            if (is_numeric($first)) {
+                return (float) $first;
+            }
+        }
+        return 0.0;
+    }
+    
+    /**
+     * Allow (string) casting
+     */
+    public function __toString(): string {
+        $this->load();
+        if (is_scalar($this->data)) {
+            return (string) $this->data;
+        }
+        if (is_array($this->data)) {
+            return json_encode($this->data);
+        }
+        return '';
     }
     
     /**

@@ -216,7 +216,24 @@ class AsyncContext {
     
     private function convertResult(array $data, string $method, ?string $modelClass) {
         if (empty($data)) {
+            if (in_array($method, ['count', 'sum', 'avg', 'max', 'min'])) {
+                return 0;
+            }
             return $method === 'find' ? null : [];
+        }
+        
+        // Handle aggregate results (count/sum/avg/max/min)
+        if (in_array($method, ['count', 'sum', 'avg', 'max', 'min'])) {
+            if (!empty($data[0])) {
+                // Aggregate queries return a single row with the aggregate value
+                $firstRow = $data[0];
+                if (is_array($firstRow)) {
+                    // Get the first (and only) value from the row
+                    return reset($firstRow);
+                }
+                return $firstRow;
+            }
+            return 0;
         }
         
         if ($modelClass && class_exists($modelClass)) {

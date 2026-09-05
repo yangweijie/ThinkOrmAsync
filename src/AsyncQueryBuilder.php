@@ -15,10 +15,8 @@ class AsyncQueryBuilder {
             return $this->originalQuery->find(...$args);
         }
         
-        $key = $this->generateQueryKey();
-        AsyncContext::getInstance()->addQuery($key, $this->originalQuery, 'find');
-        
-        return new AsyncResultPlaceholder($key, 'find');
+        // Execute immediately via wrapper's find() method
+        return $this->originalQuery->find();
     }
     
     public function select(array $data = []): \think\Collection {
@@ -26,10 +24,8 @@ class AsyncQueryBuilder {
             return $this->originalQuery->select($data);
         }
         
-        $key = $this->generateQueryKey();
-        AsyncContext::getInstance()->addQuery($key, $this->originalQuery, 'select');
-        
-        return new AsyncResultPlaceholder($key, 'select');
+        // Execute immediately via wrapper's select() method
+        return $this->originalQuery->select();
     }
     
     public function __call($method, $args) {
