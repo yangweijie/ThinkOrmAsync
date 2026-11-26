@@ -155,6 +155,39 @@ $results = AsyncContext::end();
 // 所有查询并行执行
 ```
 
+### 关联预载 with()
+
+```php
+AsyncContext::start();
+
+    $users = User::with(['profile', 'orders' => function ($q) {
+        $q->where('status', 1);
+    }])->select();
+
+    // 嵌套关联
+    $orders = Order::with('user.profile')->where('id', '>', 10)->select();
+
+AsyncContext::end();
+
+echo $users[0]->profile->city;
+```
+
+支持 `hasOne` / `hasMany` / `belongsTo` / `belongsToMany`，关联查询与主查询一样并行执行。
+`morph*` / `through` 等复杂关联自动降级到 ThinkPHP 原生预载。
+
+### 查询缓存 cache()
+
+```php
+AsyncContext::start();
+
+    $user = User::where('id', 1)->cache('user_1', 3600)->find();
+    $list = User::where('status', 1)->cache(true)->select(); // 按 SQL 指纹自动生成 key
+
+AsyncContext::end();
+```
+
+缓存命中时不会发起任何数据库查询。缓存未配置时静默降级为普通查询。
+
 ## 配置
 
 ### 自动配置（推荐）

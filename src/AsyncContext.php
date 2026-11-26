@@ -135,13 +135,33 @@ class AsyncContext {
     }
     
     public function addQuery(string $key, $query, string $method): void {
-        $this->queries[$key] = [
+        $sql = $this->extractSql($query, $method);
+        $cache = $query instanceof AsyncQueryWrapper ? $query->getCacheOption() : null;
+        $with = $query instanceof AsyncQueryWrapper ? $query->getWithOption() : [];
+
+        $item = [
             'query' => $query,
             'method' => $method,
-            'sql' => $this->extractSql($query, $method),
+            'sql' => $sql,
             'model' => $this->getModelClass($query),
             'type' => 'orm',
+            'with' => $with,
+            'cache' => null,
         ];
+
+        if ($cache !== null) {
+            $cacheKey = AsyncQueryCache::makeKey($sql, $cache[0]);
+            $cached = AsyncQueryCache::get($cacheKey);
+
+            if (is_array($cached)) {
+                // 命中缓存：不进入异步批次。包成与 mysqli 结果一致的形状，复用后面的转换逻辑
+                $item['cachedRows'] = ['data' => $cached];
+            } else {
+                $item['cache'] = [$cacheKey, $cache[1], $cache[2]];
+            }
+        }
+
+        $this->queries[$key] = $item;
     }
     
     public static function query(string $sql, string $key = ''): AsyncResultPlaceholder {
@@ -172,47 +192,77 @@ class AsyncContext {
         if (empty($this->queries)) {
             return $this->results;
         }
-        
+
+        // 缓存命中的查询不进入异步批次
         $sqlQueries = [];
         foreach ($this->queries as $key => $item) {
-            $sqlQueries[$key] = $item['sql'];
+            if (!isset($item['cachedRows'])) {
+                $sqlQueries[$key] = $item['sql'];
+            }
         }
-        
+
         $rawResults = $this->asyncQuery->executeAsyncQueries($sqlQueries);
-        
-        foreach ($rawResults as $key => $raw) {
+
+        $relations = [];
+        foreach ($this->queries as $key => $item) {
+            $raw = $item['cachedRows'] ?? ($rawResults[$key] ?? ['error' => 'No result']);
+
             if (isset($raw['error'])) {
                 $this->results[$key] = $raw;
                 continue;
             }
-            
-            $queryType = $this->queries[$key]['type'] ?? 'orm';
-            
+
+            $queryType = $item['type'] ?? 'orm';
+
             if ($queryType === 'raw') {
                 // 原生查询，直接返回结果
                 if (isset($raw['type']) && $raw['type'] === 'exec') {
-                    // 执行类查询（INSERT/UPDATE/DELETE）
                     $this->results[$key] = [
                         'type' => 'exec',
                         'affected_rows' => $raw['affected_rows'],
                         'insert_id' => $raw['insert_id'],
                     ];
                 } else {
-                    // SELECT 查询
                     $this->results[$key] = $raw['data'] ?? [];
                 }
-            } else {
-                // ORM 查询
-                $data = $raw['data'] ?? [];
-                $method = $this->queries[$key]['method'];
-                $modelClass = $this->queries[$key]['model'];
-                
-                $this->results[$key] = $this->convertResult($data, $method, $modelClass);
+                continue;
+            }
+
+            $data = $raw['data'] ?? [];
+            $method = $item['method'];
+            $modelClass = $item['model'];
+
+            // 缓存写出来的是原始结果集，和 ThinkPHP 自身行为一致
+            if (!isset($item['cachedRows']) && $item['cache'] !== null) {
+                AsyncQueryCache::set($item['cache'][0], $data, $item['cache'][1], $item['cache'][2]);
+            }
+
+            $result = $this->convertResult($data, $method, $modelClass);
+
+            // 关联预载在主体结果落地后执行；同一 with 里的多个关联仍在一个异步批次里并行
+            if (!empty($item['with'])) {
+                $models = $result instanceof \think\Collection
+                    ? $result->all()
+                    : (is_array($result) ? $result : (is_object($result) ? [$result] : []));
+                if (!empty($models)) {
+                    $relations[] = [$modelClass, $models, $item['with']];
+                }
+            }
+
+            $this->results[$key] = $result;
+        }
+
+        if (!empty($relations)) {
+            $loader = new AsyncRelationLoader($this->asyncQuery);
+            foreach ($relations as [$modelClass, $models, $with]) {
+                if ($modelClass && class_exists($modelClass)) {
+                    $loader->eagerLoad($modelClass, $models, $with);
+                }
             }
         }
-        
+
         $this->asyncQuery->close();
-        
+
         return $this->results;
     }
     

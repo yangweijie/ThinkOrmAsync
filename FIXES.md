@@ -1,5 +1,48 @@
 # 修复记录
 
+## 2026-11-26: 支持 with() 关联预载 / 修复 cache() 在异步路径失效
+
+### with() 关联预载
+
+旧实现直接抛 `AsyncQueryException`，异步上下文里完全不能用 `with()`。
+
+新实现：
+
+- `AsyncRelationLoader` 归一化 `with()` 的字符串 / 数组 / 闭包 / 嵌套写法。
+- 用 ThinkPHP 原生关联对象 + `fetchSql(true)` 生成关联 SQL，交给 `AsyncQuery`
+  批量并行执行。软删除、全局 scope、闭包条件、字段限制、JOIN 均由 ORM 处理。
+- 同一层的所有关联查询放在一个异步批次；嵌套关联按层级推进。
+- 支持 `HasOne` / `HasMany` / `BelongsTo` / `BelongsToMany`。
+  `MorphTo` / `MorphMany` / `MorphToMany` / `HasOneThrough` / `HasManyThrough`
+  等复杂关联走 ThinkPHP 原生 `eagerlyResultSet()` 降级，保证语义正确。
+- 原生降级失败时抛 `AsyncQueryException`，不静默丢关联数据。
+
+注意：`belongsToMany` 的分组键来自中间表（`pivot__xxx`），模型构造函数会过滤掉
+非表字段，因此分组必须用原始结果集完成，不能用模型属性。
+
+### cache() 在异步路径失效
+
+根因：ThinkPHP 的缓存由 `Connection::pdoQuery()` 处理；异步路径把 SQL 直接交给
+mysqli 执行，绕过了 `Connection`，`options['cache']` 只被存进数组从未消费。
+
+新实现（`AsyncQueryCache`）：
+
+- `cache(true)` 用 SQL 指纹生成 key，`cache('key')` 用显式 key，
+  `cache(3600)` 识别为过期时间，`cache(false)` 禁用。
+- 注册查询时先读缓存；命中则跳过异步批次，直接走结果转换。
+- 主体查询返回后把**原始结果集**写回缓存，与 ThinkPHP 自身行为一致。
+- 立即执行路径（`AsyncContext` 外）也走同一套缓存逻辑。
+- 缓存未配置或驱动异常时静默降级，不影响查询本身。
+
+其他修正：`buildQueryKey()` 序列化 options 时排除 `with` / `cache`，避免闭包导致
+`Serialization of 'Closure' is not allowed`。
+
+### 验证
+
+`php tests/integration_with_cache_check.php`（SQLite 内存库，无需 MySQL）：
+15 项检查全部通过，覆盖四种关联、嵌套预载、预载与懒加载区分、缓存参数归一化、
+异步路径缓存命中与带闭包 `with()`。
+
 ## 2026-11-26: 修复链头方法被静默丢弃（fieldRaw / where / column 等）
 
 ### 问题描述
@@ -84,6 +127,53 @@ return new AsyncQueryBuilder($query, $modelClass);
 在真实业务库上用同一份数据对比「原生 ORM」与「AsyncContext 内异步」的结果，
 覆盖 `sum`、`fieldRaw + group + select`、`column + limit`、两参数 `where(字符串)`、
 `whereOr`、`whereBetween`、`whereRaw`，全部逐值一致；未实现方法按预期抛错。
+
+## 2026-11-26: 异步执行器连接池 + 失败快速返回
+
+### 问题描述
+
+`AsyncQuery::executeAsyncQueries()` 为每条 SQL `new mysqli()` 建独立连接。同机房建连 1~5ms 无所谓，
+但跨地域/走 VPN 时一次握手 150~250ms，且这批建连是**串行**的：
+
+```
+6 条查询 × 200ms 建连 = 1.2s，全部查询实际执行只有几十毫秒
+```
+
+并行收益被建连成本完全吃掉——一个看板接口从 1.8s 变成 3~7s。
+
+### 修复
+
+1. 增加跨请求复用的空闲连接池（`AsyncQuery::$connectionPool`，按 host/port/user/db 分桶）：
+
+```php
+$conn = $this->borrowConnection();   // 池里有就直接用
+...
+$this->releaseConnection($conn);     // 成功的连接归还，出错的连接直接关闭
+```
+
+workerman 等常驻进程的 worker 可直接复用，建连成本只在进程启动后的首批请求发生。
+池大小上限 `$maxIdleConnections = 16`（等于一批查询的最大并发数），另提供 `AsyncQuery::flushPool()`。
+
+2. 不要用 `mysqli::ping()` 探活。PHP 8.4 起该方法已废弃，调用会抛
+`mysqli::ping() is deprecated ...`——第一版实现因此把所有池内连接误判为失效，
+日志显示池里连接数一直增长但复用次数为 0。改为不做探活：连接真断了，
+`query()` 会抛连接类异常，由重试分支**用新建连接**重跑（不能再用 `borrowConnection()`，
+否则会拿到池里同样失效的连接）。
+
+3. `reap_async_query()` 返回 `false`（查询失败）时立即记录错误并从 pending 移除。
+旧实现只在 `$result` 为真时 `unset($pending[$key])`，失败/超时的查询会一直留在 pending 里，
+直到 `$timeout`（默认 10s）才返回，表现为接口偶发卡 10 秒。
+
+### 效果
+
+本地（走 VPN，RTT≈50ms、建连≈200ms）实测同一接口：
+
+| 场景 | 改造前（原生串行） | 改造后（3 批并行 + 连接池） |
+| --- | --- | --- |
+| 冷请求（进程刚启动） | 1.8~2.1s | 4.7s（首批要建 7 条连接） |
+| 冷请求（池已热） | 1.8~2.1s | 0.62~0.91s |
+
+同机房部署时建连几乎为 0，热池路径只剩 3 个并行批次的实际查询耗时。
 
 ## 2025-01-06: 修复 "Commands out of sync" 错误
 

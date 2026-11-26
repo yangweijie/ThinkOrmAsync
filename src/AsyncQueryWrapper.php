@@ -245,20 +245,34 @@ class AsyncQueryWrapper {
     }
 
     /**
-     * 关联预载（with）在异步上下文里没有实现。
-     * 旧实现只把参数塞进 options，构建 SQL 时完全不处理 —— 结果集静默缺少关联数据，
-     * 比直接报错危险得多，因此这里显式抛错。
+     * 关联预载：保存归一化后的关联树，在结果回填阶段并行加载。
+     *
+     * 旧实现直接抛异常，导致异步上下文里根本没法用 with()。
+     * 现在支持 HasOne / HasMany / BelongsTo / BelongsToMany 的异步预载，
+     * Morph* / Through 等复杂关联走 ThinkPHP 原生预载降级。
      */
     public function with($relations) {
-        throw new AsyncQueryException(
-            'with() / 关联预载 not supported in async context, use native think-orm outside AsyncContext. '
-            . 'Model: ' . $this->modelClass
-        );
+        $this->options['with'] = AsyncRelationLoader::normalize($relations);
+        return $this;
     }
 
     public function cache($key = true, $expire = null, $tag = null) {
-        $this->options['cache'] = [$key, $expire, $tag];
+        $this->options['cache'] = AsyncQueryCache::normalize($key, $expire, $tag);
         return $this;
+    }
+
+    /**
+     * 给 AsyncContext 读取归一化后的缓存配置
+     */
+    public function getCacheOption(): ?array {
+        return $this->options['cache'] ?? null;
+    }
+
+    /**
+     * 给 AsyncContext / 立即执行路径读取归一化后的关联树
+     */
+    public function getWithOption(): array {
+        return $this->options['with'] ?? [];
     }
 
     private function normalizeCondition($field, $op, $value, int $argc): array {
@@ -394,7 +408,7 @@ class AsyncQueryWrapper {
      */
     private function executeImmediateSelect(): \think\Collection {
         $sql = $this->buildSql('select');
-        $rows = $this->executeImmediateAll($sql);
+        $rows = $this->executeImmediateWithCache($sql);
         $modelClass = $this->modelClass;
 
         if ($modelClass && class_exists($modelClass)) {
@@ -402,6 +416,7 @@ class AsyncQueryWrapper {
             foreach ($rows as $row) {
                 $models[] = new $modelClass($row);
             }
+            $this->applyRelations($models);
             return new \think\Collection($models);
         }
 
@@ -413,28 +428,65 @@ class AsyncQueryWrapper {
      */
     private function executeImmediateFind() {
         $sql = $this->buildSql('find');
-        $rows = $this->executeImmediateAll($sql);
-        $modelClass = $this->modelClass;
+        $rows = $this->executeImmediateWithCache($sql);
 
         if (empty($rows)) {
             return null;
         }
 
         $row = $rows[0];
+        $modelClass = $this->modelClass;
 
         if ($modelClass && class_exists($modelClass)) {
-            return new $modelClass($row);
+            $model = new $modelClass($row);
+            $this->applyRelations([$model]);
+            return $model;
         }
 
         return $row;
     }
 
+    /**
+     * 立即执行路径的缓存读写，与异步路径共用同一套 key 规则。
+     */
+    private function executeImmediateWithCache(string $sql): array {
+        $cache = $this->getCacheOption();
+        if ($cache !== null) {
+            $cacheKey = AsyncQueryCache::makeKey($sql, $cache[0]);
+            $cached = AsyncQueryCache::get($cacheKey);
+            if (is_array($cached)) {
+                return $cached;
+            }
+        }
+
+        $rows = $this->executeImmediateAll($sql);
+
+        if ($cache !== null) {
+            AsyncQueryCache::set($cacheKey, $rows, $cache[1], $cache[2]);
+        }
+
+        return $rows;
+    }
+
+    private function applyRelations(array $models): void {
+        $with = $this->getWithOption();
+        if (empty($with) || empty($models)) {
+            return;
+        }
+
+        (new AsyncRelationLoader())->eagerLoad($this->modelClass, $models, $with);
+    }
+
     private function buildQueryKey(string $method): string {
+        // with 里可能带闭包，serialize() 会直接抛错；cache/with 也不影响 SQL 本身
+        $options = $this->options;
+        unset($options['with'], $options['cache']);
+
         return md5($this->modelClass . '_' . $method . '_' . md5(serialize([
             $this->whereConditions,
             $this->orConditions,
             $this->rawConditions,
-            $this->options,
+            $options,
         ])) . '_' . uniqid('', true));
     }
 
