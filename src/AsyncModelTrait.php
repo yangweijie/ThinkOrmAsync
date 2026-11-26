@@ -21,10 +21,26 @@ trait AsyncModelTrait {
                 return $wrapper->$method();
             }
             
-            // 其他方法，创建查询构建器包装器
+            // 其他方法：创建查询构建器，并把本次调用的方法/参数转发给 wrapper。
+            //
+            // 这里曾经直接 new AsyncQueryBuilder 而不转发 $method/$args，
+            // 导致 Model::where([...]) / fieldRaw() / field() / whereIn() / whereNull()
+            // 等"链头方法"被无声丢弃：
+            //   - 条件丢失 → SQL 变成全表统计（跨商户数据串号）
+            //   - fieldRaw 丢失 → SELECT * ... GROUP BY，取不到聚合别名
+            //     （报 Undefined array key "sales_volume"，count 统计恒为 0）
             $modelClass = get_called_class();
             $tableName = self::getModelTableName($modelClass);
             $query = new AsyncQueryWrapper($modelClass, $tableName);
+
+            $result = $query->$method(...$args);
+
+            // 终止型方法（count/sum/avg/max/min/column/value 等）会返回标量或数组，
+            // 不能再用 builder 包一层，否则调用方拿到的是对象而不是结果。
+            if ($result !== $query) {
+                return $result;
+            }
+
             return new AsyncQueryBuilder($query, $modelClass);
         }
         
